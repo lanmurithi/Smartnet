@@ -1,0 +1,784 @@
+// PayHero API Configuration
+const PAYHERO_CONFIG = {
+    apiUsername: 'Yr4Hrqe0wPL4WmqDD2a8',
+    apiPassword: 'gL0IZpUtjQOxkXTNppZXhEQ4konb7CGCMdFwZ0ll',
+    baseUrl: 'https://backend.payhero.co.ke/api/v2',
+    channelId: 2651,
+    provider: 'm-pesa',
+    callbackUrl: 'https://0d6f-102-215-77-246.ngrok-free.app'
+};
+
+// Session credentials mapping
+const SESSION_CREDENTIALS = {
+    '3h': { username: 'smartNet', password: 'smartNet@5120' },
+    '12h': { username: 'smartNet 12', password: 'smartNet@5120' },
+    '24h': { username: 'smartNet 24', password: 'smartNet@5120' },
+    '1w': { username: 'smartNet 1w', password: 'smartNet@5120' },
+    '2w': { username: 'smartNet 2w', password: 'smartNet@5120' },
+    '1m': { username: 'smartNet 1m', password: 'smartNet@5120' }
+};
+
+// Global variables
+let selectedSession = null;
+let currentModal = null;
+let paymentReference = null;
+let statusCheckInterval = null;
+let redirectTimer = null;
+let authenticationAttempted = false;
+
+// Get MikroTik configuration from HTML
+function getMikroTikConfig() {
+    if (typeof window.MIKROTIK_CONFIG !== 'undefined') {
+        return window.MIKROTIK_CONFIG;
+    }
+    
+    // Fallback if config not available
+    debugLog('Warning: MikroTik config not found, using fallback', 'warning');
+    return {
+        actionUrl: '/login',
+        destination: '',
+        popup: '',
+        chapId: '',
+        chapChallenge: '',
+        mac: '',
+        ip: '',
+        sessionId: '',
+        linkStatus: '',
+        error: ''
+    };
+}
+
+// Generate Basic Auth token for PayHero
+function getBasicAuthToken() {
+    const credentials = PAYHERO_CONFIG.apiUsername + ':' + PAYHERO_CONFIG.apiPassword;
+    return 'Basic ' + btoa(credentials);
+}
+
+// Keyboard event handler for preventing dev tools
+document.addEventListener('keydown', function (e) {
+    if (
+        e.key === 'F12' ||
+        (e.ctrlKey && e.shiftKey && e.key === 'I') ||
+        (e.ctrlKey && e.key === 'U')
+    ) {
+        e.preventDefault();
+    }
+});
+
+// Generate unique external reference
+function generateExternalReference() {
+    return 'SMARTNET-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+// Enhanced phone number validation to include new Safaricom format
+function validatePhoneNumber(phoneNumber) {
+    const cleanNumber = phoneNumber.replace(/\D/g, '');
+    const patterns = [
+        /^0[7-9][0-9]{8}$/,    // Traditional format: 0712345678
+        /^011[0-9]{7}$/        // New Safaricom format: 0112356476
+    ];
+    return patterns.some(pattern => pattern.test(cleanNumber));
+}
+
+// Enhanced logging function (console only)
+function debugLog(message, type = 'info') {
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] ${type.toUpperCase()}: ${message}`;
+    console.log(logEntry);
+}
+
+// Session selection function
+function selectSession(sessionType, sessionLabel, price) {
+    selectedSession = {
+        type: sessionType,
+        label: sessionLabel,
+        price: price
+    };
+    
+    debugLog(`Session selected: ${sessionType} (${sessionLabel}) - KES ${price}`);
+    showPaymentModal();
+    return false;
+}
+
+// Show payment modal
+function showPaymentModal() {
+    debugLog('Showing payment modal...');
+    
+    if (currentModal) {
+        currentModal.remove();
+    }
+    
+    const modalOverlay = document.createElement('div');
+    modalOverlay.className = 'modal-overlay';
+    modalOverlay.id = 'paymentModal';
+    
+    const modal = document.createElement('div');
+    modal.className = 'payment-modal';
+    
+    modal.innerHTML = `
+        <div class="modal-header">
+            <h2>Pay for ${selectedSession.label}</h2>
+            <div class="session-info">
+                <strong>Amount: KES ${selectedSession.price}</strong><br>
+                Duration: ${selectedSession.label}<br>
+                Payment via M-Pesa
+            </div>
+        </div>
+        
+        <form id="paymentForm">
+            <div class="form-group">
+                <label for="phoneNumber">M-Pesa Phone Number</label>
+                <input type="text" id="phoneNumber" placeholder="0712345678 or 0112356476" maxlength="10" required>
+            </div>
+            
+            <div class="modal-status" id="modalStatus"></div>
+            
+            <div class="reference-display" id="referenceDisplay" style="display: none;">
+                <strong>Transaction Reference:</strong> <span id="transactionRef"></span>
+            </div>
+            
+            <div class="modal-buttons">
+                <button type="button" class="btn btn-secondary" onclick="closePaymentModal()" id="cancelBtn">
+                    Cancel
+                </button>
+                <button type="submit" class="btn btn-primary" id="payBtn">
+                    Pay KES ${selectedSession.price}
+                </button>
+            </div>
+        </form>
+    `;
+    
+    modalOverlay.appendChild(modal);
+    document.body.appendChild(modalOverlay);
+    currentModal = modalOverlay;
+    
+    // Focus on phone number field
+    setTimeout(() => {
+        const phoneField = document.getElementById('phoneNumber');
+        if (phoneField) {
+            phoneField.focus();
+        }
+    }, 100);
+    
+    // Handle form submission
+    const paymentForm = document.getElementById('paymentForm');
+    paymentForm.onsubmit = function(e) {
+        e.preventDefault();
+        handlePaymentSubmit();
+    };
+    
+    // Close modal when clicking overlay
+    modalOverlay.onclick = function(e) {
+        if (e.target === modalOverlay) {
+            closePaymentModal();
+        }
+    };
+    
+    // Enhanced phone number formatting for both formats
+    const phoneInput = document.getElementById('phoneNumber');
+    phoneInput.addEventListener('input', function(e) {
+        let value = e.target.value.replace(/\D/g, '');
+        if (value.length > 10) value = value.substring(0, 10);
+        
+        // Handle both traditional (07, 08, 09) and new Safaricom (011) formats
+        if (value.length > 0 && !value.startsWith('0')) {
+            value = '0' + value;
+        }
+        
+        e.target.value = value;
+    });
+    
+    debugLog('Payment modal displayed');
+}
+
+// Handle payment form submission
+async function handlePaymentSubmit() {
+    const phoneNumber = document.getElementById('phoneNumber').value.trim();
+    
+    if (!validatePhoneNumber(phoneNumber)) {
+        showModalStatus('Please enter a valid phone number (e.g., 0712345678 or 0112356476)', 'error');
+        return;
+    }
+    
+    debugLog(`Payment form submitted: phone=${phoneNumber}, amount=${selectedSession.price}`);
+    
+    const payBtn = document.getElementById('payBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    
+    payBtn.textContent = 'Processing...';
+    payBtn.disabled = true;
+    cancelBtn.disabled = true;
+    
+    showModalStatus('Initiating M-Pesa payment...', 'pending');
+    
+    try {
+        const result = await initiatePayment(phoneNumber, selectedSession.price);
+        
+        if (result.success) {
+            paymentReference = result.data.reference;
+            showModalStatus(`📱 STK Push sent to ${phoneNumber}. Check your phone!`, 'pending');
+            showTransactionReference(paymentReference);
+            startPaymentStatusCheck();
+        } else {
+            throw new Error(result.message || 'Payment initiation failed');
+        }
+    } catch (error) {
+        debugLog(`Payment error: ${error.message}`, 'error');
+        showModalStatus(`Payment failed: ${error.message}`, 'error');
+        resetModalButtons();
+    }
+}
+
+// Initiate PayHero payment
+async function initiatePayment(phoneNumber, amount) {
+    const externalReference = generateExternalReference();
+    
+    const paymentData = {
+        amount: parseFloat(amount),
+        phone_number: phoneNumber,
+        channel_id: PAYHERO_CONFIG.channelId,
+        provider: PAYHERO_CONFIG.provider,
+        external_reference: externalReference,
+        customer_name: "SmartNet Customer",
+        callback_url: PAYHERO_CONFIG.callbackUrl
+    };
+
+    debugLog(`Initiating payment: ${JSON.stringify(paymentData)}`);
+
+    try {
+        const response = await fetch(`${PAYHERO_CONFIG.baseUrl}/payments`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': getBasicAuthToken()
+            },
+            body: JSON.stringify(paymentData)
+        });
+
+        const result = await response.json();
+        debugLog(`Payment response: ${JSON.stringify(result)}`);
+        
+        if (response.ok) {
+            let reference = result.data?.reference || 
+                           result.reference || 
+                           result.data?.external_reference || 
+                           result.external_reference ||
+                           result.data?.id ||
+                           result.id ||
+                           externalReference;
+            
+            debugLog(`✅ Payment reference extracted: ${reference}`);
+            
+            return {
+                success: true,
+                data: {
+                    reference: reference,
+                    external_reference: externalReference,
+                    checkout_request_id: result.data?.checkout_request_id || result.checkout_request_id,
+                    full_response: result
+                }
+            };
+        } else {
+            throw new Error(result.message || result.error || `HTTP ${response.status}`);
+        }
+    } catch (error) {
+        debugLog(`Payment error: ${error.message}`, 'error');
+        throw error;
+    }
+}
+
+// Check payment status
+async function checkPaymentStatus(reference) {
+    try {
+        debugLog(`Checking payment status for reference: ${reference}`);
+        
+        const url = `${PAYHERO_CONFIG.baseUrl}/transaction-status?reference=${reference}`;
+        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'Authorization': getBasicAuthToken()
+            }
+        });
+        
+        debugLog(`Status check response status: ${response.status}`);
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            debugLog(`Status check error response: ${errorText}`);
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        debugLog(`Status response: ${JSON.stringify(result)}`);
+        
+        const status = result.status || result.data?.status || result.transaction_status || 'unknown';
+        
+        return {
+            success: true,
+            data: {
+                status: status.toLowerCase(),
+                reference: result.reference || result.data?.reference || reference,
+                amount: result.amount || result.data?.amount,
+                phone_number: result.phone_number || result.data?.phone_number,
+                mpesa_receipt_number: result.mpesa_receipt_number || result.data?.mpesa_receipt_number,
+                provider_reference: result.provider_reference || result.data?.provider_reference,
+                transaction_date: result.transaction_date || result.data?.transaction_date,
+                full_response: result
+            }
+        };
+        
+    } catch (error) {
+        debugLog(`Status check error: ${error.message}`, 'error');
+        return {
+            success: false,
+            message: error.message || 'Status check failed'
+        };
+    }
+}
+
+// Start payment status checking
+function startPaymentStatusCheck() {
+    if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+    }
+
+    let attempts = 0;
+    const maxAttempts = 30; // 5 minutes
+
+    debugLog(`🔄 Starting status check for reference: ${paymentReference}`);
+
+    statusCheckInterval = setInterval(async () => {
+        attempts++;
+        
+        try {
+            const result = await checkPaymentStatus(paymentReference);
+
+            if (result.success && result.data) {
+                const status = result.data.status;
+                
+                debugLog(`Status check ${attempts}/${maxAttempts}: ${status}`);
+                
+                if (status === 'successful' || status === 'completed' || status === 'success') {
+                    clearInterval(statusCheckInterval);
+                    
+                    const receipt = result.data.mpesa_receipt_number || result.data.provider_reference;
+                    showModalStatus(`✅ Payment successful! ${receipt ? 'M-Pesa Receipt: ' + receipt : ''}`, 'success');
+                    
+                    // Wait 2 seconds then authenticate
+                    setTimeout(() => {
+                        closePaymentModal();
+                        authenticateWithCredentials();
+                    }, 2000);
+                    
+                } else if (status === 'failed' || status === 'cancelled' || status === 'rejected') {
+                    clearInterval(statusCheckInterval);
+                    showModalStatus(`❌ Payment failed or cancelled. Please try again.`, 'error');
+                    resetModalButtons();
+                    
+                } else if (status === 'pending' || status === 'initiated') {
+                    showModalStatus(`⏳ Payment pending... Please complete on your phone`, 'pending');
+                    
+                } else {
+                    showModalStatus(`🔄 Payment status: ${status}`, 'pending');
+                }
+            } else {
+                debugLog(`Status check ${attempts}/${maxAttempts}: ${result.message || 'No data'}`);
+                
+                if (attempts % 5 === 0) {
+                    showModalStatus(`🔍 Checking payment status... (${attempts}/${maxAttempts})`, 'pending');
+                }
+            }
+
+        } catch (error) {
+            debugLog(`Status check error: ${error.message}`, 'error');
+        }
+
+        if (attempts >= maxAttempts) {
+            clearInterval(statusCheckInterval);
+            showModalStatus(`⏰ Payment verification timeout. If payment was successful, try refreshing the page.`, 'error');
+            resetModalButtons();
+        }
+    }, 10000); // Check every 10 seconds
+}
+
+// Show modal status
+function showModalStatus(message, type) {
+    const statusDiv = document.getElementById('modalStatus');
+    if (statusDiv) {
+        statusDiv.style.display = 'block';
+        statusDiv.textContent = message;
+        statusDiv.className = `modal-status ${type}`;
+    }
+}
+
+// Show transaction reference
+function showTransactionReference(reference) {
+    const refDisplay = document.getElementById('referenceDisplay');
+    const refElement = document.getElementById('transactionRef');
+    
+    if (refDisplay && refElement) {
+        refElement.textContent = reference;
+        refDisplay.style.display = 'block';
+    }
+}
+
+// Reset modal buttons
+function resetModalButtons() {
+    const payBtn = document.getElementById('payBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    
+    if (payBtn) {
+        payBtn.textContent = `Pay KES ${selectedSession.price}`;
+        payBtn.disabled = false;
+    }
+    if (cancelBtn) {
+        cancelBtn.disabled = false;
+    }
+}
+
+// Close payment modal
+function closePaymentModal() {
+    debugLog('Closing payment modal');
+    
+    if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+    }
+    
+    if (currentModal) {
+        currentModal.style.animation = 'fadeOut 0.3s ease';
+        setTimeout(() => {
+            if (currentModal && currentModal.parentNode) {
+                currentModal.parentNode.removeChild(currentModal);
+                currentModal = null;
+            }
+        }, 300);
+    }
+}
+
+// Authenticate with pre-defined credentials
+function authenticateWithCredentials() {
+    debugLog('Starting authentication with pre-defined credentials...');
+    
+    const credentials = SESSION_CREDENTIALS[selectedSession.type];
+    if (!credentials) {
+        debugLog('No credentials found for session type', 'error');
+        showMainMessage('Authentication error: Invalid session type', 'alert');
+        return;
+    }
+    
+    debugLog(`Using credentials: ${credentials.username}`);
+    
+    // Show connecting overlay
+    showConnectingOverlay();
+    
+    // Disable all session buttons
+    const sessionBtns = document.querySelectorAll('.session-btn');
+    sessionBtns.forEach(btn => btn.disabled = true);
+    
+    showMainMessage('Payment successful! Connecting to SmartNet...', 'success');
+    
+    // Wait a moment then authenticate
+    setTimeout(() => {
+        performAuthentication(credentials.username, credentials.password);
+    }, 1000);
+}
+
+// Direct login function
+function directLogin() {
+    const username = document.getElementById('directUsername').value.trim();
+    const password = document.getElementById('directPassword').value.trim();
+    
+    if (!username || !password) {
+        showMainMessage('Please enter both username and password', 'alert');
+        return;
+    }
+    
+    debugLog('Starting direct login...');
+    
+    // Show connecting overlay
+    showConnectingOverlay();
+    
+    // Disable all buttons
+    const buttons = document.querySelectorAll('button');
+    buttons.forEach(btn => btn.disabled = true);
+    
+    showMainMessage('Logging in...', 'success');
+    
+    // Wait a moment then authenticate
+    setTimeout(() => {
+        performAuthentication(username, password);
+    }, 1000);
+}
+
+// Show connecting overlay with improved management
+function showConnectingOverlay() {
+    const overlay = document.getElementById('connectingOverlay');
+    if (overlay) {
+        overlay.style.display = 'flex';
+        authenticationAttempted = true;
+        
+        // Start monitoring for successful authentication
+        startAuthenticationMonitoring();
+    }
+}
+
+// Hide connecting overlay
+function hideConnectingOverlay() {
+    const overlay = document.getElementById('connectingOverlay');
+    if (overlay) {
+        overlay.style.display = 'none';
+    }
+    
+    // Clear any timers
+    if (redirectTimer) {
+        clearTimeout(redirectTimer);
+        redirectTimer = null;
+    }
+    
+    // Re-enable session buttons
+    const sessionBtns = document.querySelectorAll('.session-btn');
+    sessionBtns.forEach(btn => btn.disabled = false);
+    
+    // Re-enable other buttons
+    const buttons = document.querySelectorAll('button');
+    buttons.forEach(btn => btn.disabled = false);
+    
+    authenticationAttempted = false;
+}
+
+// Improved authentication monitoring
+function startAuthenticationMonitoring() {
+    debugLog('Starting authentication monitoring...');
+    
+    // Clear any existing timer
+    if (redirectTimer) {
+        clearTimeout(redirectTimer);
+    }
+    
+    // Set timeout for authentication failure
+    redirectTimer = setTimeout(() => {
+        debugLog('Authentication timeout reached', 'warning');
+        hideConnectingOverlay();
+        showMainMessage('Connection timeout. Please check your credentials and try again.', 'alert');
+    }, 15000); // 15 second timeout
+    
+    // Monitor for page visibility changes (indicating redirect)
+    const handleVisibilityChange = () => {
+        if (document.hidden && authenticationAttempted) {
+            debugLog('Page became hidden - likely successful redirect');
+            clearTimeout(redirectTimer);
+        }
+    };
+    
+    // Monitor for beforeunload (page navigation)
+    const handleBeforeUnload = () => {
+        debugLog('Page unloading - authentication likely successful');
+        if (redirectTimer) {
+            clearTimeout(redirectTimer);
+        }
+    };
+    
+    // Add event listeners
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    
+    // Clean up listeners after timeout
+    setTimeout(() => {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, 16000);
+}
+
+// Perform authentication
+function performAuthentication(username, password) {
+    try {
+        const config = getMikroTikConfig();
+        
+        // Check if CHAP is enabled
+        const isChapEnabled = config.chapId && config.chapId !== '' && config.chapId !== '$(chap-id)';
+        
+        if (isChapEnabled) {
+            debugLog(`Using CHAP authentication with ID: ${config.chapId}`);
+            performChapAuthentication(username, password, config);
+        } else {
+            debugLog('Using plain text authentication');
+            performPlainAuthentication(username, password, config);
+        }
+    } catch (error) {
+        debugLog(`Authentication error: ${error.message}`, 'error');
+        showMainMessage(`Authentication failed: ${error.message}`, 'alert');
+        hideConnectingOverlay();
+    }
+}
+
+// CHAP authentication
+function performChapAuthentication(username, password, config) {
+    if (typeof hexMD5 !== 'function') {
+        debugLog('MD5 function not available, loading script...', 'warning');
+        loadMD5Script(() => {
+            performChapAuthentication(username, password, config);
+        });
+        return;
+    }
+    
+    try {
+        debugLog(`CHAP Challenge: ${config.chapChallenge}`);
+        
+        const hashedPassword = hexMD5(config.chapId + password + config.chapChallenge);
+        debugLog(`Password hashed successfully`);
+        
+        const sendinForm = document.forms['sendin'];
+        if (sendinForm) {
+            sendinForm.username.value = username;
+            sendinForm.password.value = hashedPassword;
+            
+            debugLog('Submitting CHAP authentication form...');
+            debugLog(`Form action: ${sendinForm.action}`);
+            
+            // Submit form and handle potential redirect
+            sendinForm.submit();
+            
+        } else {
+            throw new Error('CHAP form not found');
+        }
+    } catch (error) {
+        debugLog(`CHAP authentication failed: ${error.message}`, 'error');
+        showMainMessage('Authentication failed', 'alert');
+        hideConnectingOverlay();
+    }
+}
+
+// Plain text authentication - IMPROVED VERSION
+function performPlainAuthentication(username, password, config) {
+    try {
+        debugLog('Creating authentication form...');
+        debugLog(`Action URL from config: ${config.actionUrl}`);
+        
+        // Check if actionUrl is properly replaced
+        if (!config.actionUrl || config.actionUrl.includes('$(') || config.actionUrl === '/login') {
+            debugLog('Warning: Action URL may not be properly set by MikroTik', 'warning');
+        }
+        
+        const form = document.createElement('form');
+        form.method = 'post';
+        form.action = config.actionUrl;
+        form.style.display = 'none';
+        
+        const fields = {
+            'username': username,
+            'password': password,
+            'dst': config.destination || '',
+            'popup': config.popup || ''
+        };
+        
+        debugLog(`Form fields: ${JSON.stringify(fields)}`);
+        
+        for (const [name, value] of Object.entries(fields)) {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = value || '';
+            form.appendChild(input);
+        }
+        
+        document.body.appendChild(form);
+        
+        debugLog('Submitting plain authentication form...');
+        debugLog(`Form action: ${form.action}`);
+        
+        // Submit the form
+        form.submit();
+        
+        // The authentication monitoring will handle success/failure detection
+        
+    } catch (error) {
+        debugLog(`Plain authentication failed: ${error.message}`, 'error');
+        showMainMessage('Authentication failed', 'alert');
+        hideConnectingOverlay();
+    }
+}
+
+// Load MD5 script dynamically
+function loadMD5Script(callback) {
+    const script = document.createElement('script');
+    script.src = '/md5.js';
+    script.onload = callback;
+    script.onerror = () => {
+        debugLog('Failed to load MD5 script', 'error');
+        showMainMessage('Failed to load authentication script', 'alert');
+        hideConnectingOverlay();
+    };
+    document.head.appendChild(script);
+}
+
+// Show main message
+function showMainMessage(message, type) {
+    const messageDiv = document.getElementById('main-message');
+    if (messageDiv) {
+        messageDiv.textContent = message;
+        messageDiv.className = `info ${type}`;
+    }
+}
+
+// Initialize when DOM is loaded
+document.addEventListener('DOMContentLoaded', function() {
+    debugLog('SmartNet Payment & Login page loaded');
+    
+    // Ensure connecting overlay is hidden on load
+    hideConnectingOverlay();
+    
+    // Wait for MikroTik config to be available
+    setTimeout(() => {
+        const config = getMikroTikConfig();
+        
+        debugLog(`Action URL: ${config.actionUrl}`);
+        debugLog(`Destination: ${config.destination}`);
+        debugLog(`CHAP ID: ${config.chapId}`);
+        debugLog(`Client IP: ${config.ip}`);
+        debugLog(`Client MAC: ${config.mac}`);
+        debugLog(`Error: ${config.error}`);
+        
+        // Check if user is already authenticated or there's an error
+        if (config.error && config.error.trim() !== '') {
+            debugLog(`MikroTik error detected: ${config.error}`);
+            showMainMessage(`Connection Error: ${config.error}`, 'alert');
+        }
+        
+        // Check if CHAP is enabled
+        if (config.chapId && config.chapId !== '' && config.chapId !== '$(chap-id)') {
+            debugLog('CHAP authentication enabled');
+            if (typeof hexMD5 !== 'function') {
+                debugLog('MD5 function not available - will load when needed', 'warning');
+            }
+        } else {
+            debugLog('Plain text authentication mode');
+        }
+        
+        debugLog('Initialization complete - ready for session selection and payment');
+    }, 100);
+});
+
+// Clean up on page unload
+window.addEventListener('beforeunload', function() {
+    if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+    }
+    if (redirectTimer) {
+        clearTimeout(redirectTimer);
+    }
+    debugLog('Page unloading - cleaning up intervals and timers');
+});
+
+// Add fadeOut animation for modals
+if (!document.getElementById('modal-styles')) {
+    const style = document.createElement('style');
+    style.id = 'modal-styles';
+    style.textContent = `
+        @keyframes fadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
+    `;
+    document.head.appendChild(style);
+}
