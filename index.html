@@ -1,14 +1,17 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-<!--
-    <meta http-equiv="refresh" content="0;url=https://lanmurithi.github.io/Smartnet/"> -->
     <meta charset="utf-8">
     <meta http-equiv="pragma" content="no-cache" />
     <meta http-equiv="expires" content="-1" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SmartNet - Select & Pay for Session</title>
     <link rel="stylesheet" href="login.css" />
+    
+    <!-- Preload critical resources -->
+    <link rel="preload" href="features.js" as="script">
+    <link rel="preload" href="login.js" as="script">
 </head>
 
 <body oncontextmenu="return false;">
@@ -35,11 +38,23 @@
             ip: '$(ip)',
             sessionId: '$(session-id)',
             linkStatus: '$(link-status)',
-            error: '$(error)'
+            error: '$(error)',
+            linkLogout: '$(link-logout)',
+            uptime: '$(uptime)',
+            bytesIn: '$(bytes-in-nice)',
+            bytesOut: '$(bytes-out-nice)'
         };
         
         // Debug info
-        console.log('MikroTik Config:', window.MIKROTIK_CONFIG);
+        console.log('MikroTik Config Loaded:', window.MIKROTIK_CONFIG);
+        
+        // Connection state management
+        window.SMARTNET_STATE = {
+            initialized: false,
+            connected: false,
+            sessionType: null,
+            lastError: null
+        };
     </script>
 
     <!-- Connecting overlay -->
@@ -47,7 +62,10 @@
         <div class="connecting-content">
             <div class="spinner"></div>
             <h3>Connecting to SmartNet...</h3>
-            <p>Please wait while we authenticate your session.</p>
+            <p id="connectingStatus">Please wait while we authenticate your session.</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
         </div>
     </div>
 
@@ -59,14 +77,18 @@
                     <div class="brand-name">
                         <span class="wifi-icon">📶</span>SmartNet
                     </div>
-                    <div class="brand-subtitle">Reliable High-Speed WiFi Connection</div>
+                    <div class="brand-subtitle">High-Speed WiFi Connection</div>
+                    <div class="connection-status" id="connectionStatus">
+                        <span class="status-indicator" id="statusIndicator"></span>
+                        <span id="statusText">Ready to Connect</span>
+                    </div>
                 </div>
 
                 <!-- Free WiFi Offer Row -->
                 <div class="promo-section">
                     <div class="free-wifi-banner">
                         <div class="scrolling-text">
-                            <span>Free WiFi ----- Free WiFi Weekends 12AM--3AM ----- Free WiFi ----- Free WiFi Weekends 12AM--3AM </span>
+                            <span>🎁 Free WiFi ----- Free WiFi Weekends 12AM-3AM ----- Free WiFi ----- Free WiFi Weekends 12AM-3AM </span>
                         </div>
                         <button class="free-connect-btn" id="freeConnectBtn" disabled>
                             Connect Free
@@ -110,31 +132,11 @@
                 <div id="status-container">
                     <p class="info $(if error)alert$(endif)" id="main-message">
                         $(if error == "")
-                            <span class="wifi-icon">
+                            Select your preferred session below
                         $(else)
                             $(error)
                         $(endif)
                     </p>
-                </div>
-
-                <!-- Debug information -->
-                <div class="debug-info" id="debug-info">
-                    <div><strong>Connection Debug Info:</strong></div>
-                    <div id="debug-content">
-                        $(if chap-id)
-                        CHAP Authentication: Enabled<br>
-                        CHAP-ID: $(chap-id)<br>
-                        $(else)
-                        Authentication: Plain text<br>
-                        $(endif)
-                        Action URL: $(link-login-only)<br>
-                        Destination: $(link-orig)<br>
-                        Client MAC: $(mac)<br>
-                        Client IP: $(ip)<br>
-                        Session ID: $(session-id)<br>
-                        Link Status: $(link-status)<br>
-                        <div id="runtime-debug"></div>
-                    </div>
                 </div>
 
                 <!-- Compact Bottom Section -->
@@ -142,7 +144,7 @@
                     <!-- Session Selection Grid -->
                     <div class="compact-session-grid">
                         <!-- 3 Hours Session -->
-                        <button class="compact-session-btn" onclick="selectSession('3h', '3 Hours Quick Access', 10)">
+                        <button class="compact-session-btn" onclick="selectSession('3h', '3 Hours Quick Access', 10)" id="session-3h">
                             <div class="compact-session-content">
                                 <div class="session-duration">3H</div>
                                 <div class="session-price">KES 10</div>
@@ -150,23 +152,25 @@
                         </button>
 
                         <!-- 12 Hours Session -->
-                        <button class="compact-session-btn popular" onclick="selectSession('12h', '12 Hours Half Day', 25)">
+                        <button class="compact-session-btn popular" onclick="selectSession('12h', '12 Hours Half Day', 25)" id="session-12h">
                             <div class="compact-session-content">
                                 <div class="session-duration">12H</div>
                                 <div class="session-price">KES 25</div>
+                                <span class="popular-badge">POPULAR</span>
                             </div>
                         </button>
 
                         <!-- 24 Hours Session -->
-                        <button class="compact-session-btn premium" onclick="selectSession('24h', '24 Hours Full Day', 40)">
+                        <button class="compact-session-btn premium" onclick="selectSession('24h', '24 Hours Full Day', 40)" id="session-24h">
                             <div class="compact-session-content">
                                 <div class="session-duration">24H</div>
                                 <div class="session-price">KES 40</div>
+                                <span class="premium-badge">BEST VALUE</span>
                             </div>
                         </button>
 
                         <!-- 1 Week Session -->
-                        <button class="compact-session-btn extended" onclick="selectSession('1w', '1 Week Access', 150)">
+                        <button class="compact-session-btn extended" onclick="selectSession('1w', '1 Week Access', 150)" id="session-1w">
                             <div class="compact-session-content">
                                 <div class="session-duration">1W</div>
                                 <div class="session-price">KES 150</div>
@@ -174,7 +178,7 @@
                         </button>
 
                         <!-- 2 Weeks Session -->
-                        <button class="compact-session-btn extended" onclick="selectSession('2w', '2 Weeks Access', 250)">
+                        <button class="compact-session-btn extended" onclick="selectSession('2w', '2 Weeks Access', 250)" id="session-2w">
                             <div class="compact-session-content">
                                 <div class="session-duration">2W</div>
                                 <div class="session-price">KES 250</div>
@@ -182,7 +186,7 @@
                         </button>
 
                         <!-- 1 Month Session -->
-                        <button class="compact-session-btn extended" onclick="selectSession('1m', '1 Month Access', 450)">
+                        <button class="compact-session-btn extended" onclick="selectSession('1m', '1 Month Access', 450)" id="session-1m">
                             <div class="compact-session-content">
                                 <div class="session-duration">1M</div>
                                 <div class="session-price">KES 450</div>
@@ -196,17 +200,17 @@
                         <div class="compact-section customer-care">
                             <div class="section-title">📞 Support</div>
                             <div class="phone-numbers">
-                                <a class="compact-phone" href="tel:0716486955">0716486955</a>
-                                <a class="compact-phone" href="tel:0745528040">0745528040</a>
+                                <a class="compact-phone" href="tel:0716486955">📱 0716486955</a>
+                                <a class="compact-phone" href="tel:0745528040">📱 0745528040</a>
                             </div>
                         </div>
 
                         <!-- Direct Login Section -->
                         <div class="compact-section login-section">
-                            <div class="section-title">🔐 Login</div>
+                            <div class="section-title">🔐 Direct Login</div>
                             <div class="compact-form">
-                                <input type="text" id="directUsername" placeholder="Username">
-                                <input type="password" id="directPassword" placeholder="Password">
+                                <input type="text" id="directUsername" placeholder="Username" autocomplete="username">
+                                <input type="password" id="directPassword" placeholder="Password" autocomplete="current-password">
                                 <button type="button" class="compact-btn" onclick="directLogin()">LOGIN</button>
                             </div>
                         </div>
@@ -219,19 +223,136 @@
                     <div class="info bt">
                         Powered by SmartNet WiFi Solutions © 2024
                     </div>
+                    <div class="network-info" id="networkInfo">
+                        <small>IP: <span id="clientIp">$(ip)</span> | MAC: <span id="clientMac">$(mac)</span></small>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Include the JavaScript files -->
+    <!-- Include the JavaScript files in correct order -->
     <script type="text/javascript" src="features.js"></script>
     <script type="text/javascript" src="login.js"></script>
+    
+    <!-- Initialization script -->
+    <script type="text/javascript">
+        // Global initialization
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('SmartNet Portal: DOM loaded, initializing...');
+            
+            // Mark as initialized
+            window.SMARTNET_STATE.initialized = true;
+            
+            // Update connection status display
+            updateConnectionStatus();
+            
+            // Check for existing session
+            checkExistingSession();
+            
+            // Setup keyboard shortcuts (for debugging)
+            setupKeyboardShortcuts();
+        });
+        
+        // Update connection status indicator
+        function updateConnectionStatus() {
+            const statusIndicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('statusText');
+            const config = window.MIKROTIK_CONFIG;
+            
+            if (!statusIndicator || !statusText) return;
+            
+            if (config.error && config.error.trim() !== '') {
+                statusIndicator.className = 'status-indicator error';
+                statusText.textContent = 'Connection Error';
+            } else if (window.SMARTNET_STATE.connected) {
+                statusIndicator.className = 'status-indicator connected';
+                statusText.textContent = 'Connected';
+            } else {
+                statusIndicator.className = 'status-indicator ready';
+                statusText.textContent = 'Ready to Connect';
+            }
+        }
+        
+        // Check for existing session
+        function checkExistingSession() {
+            const config = window.MIKROTIK_CONFIG;
+            
+            if (config.uptime && config.uptime !== '$(uptime)' && config.uptime !== '') {
+                console.log('Existing session detected:', config.uptime);
+                window.SMARTNET_STATE.connected = true;
+                updateConnectionStatus();
+                
+                // Show session info
+                showMainMessage('Already connected! Uptime: ' + config.uptime, 'success');
+            }
+        }
+        
+        // Setup keyboard shortcuts for debugging
+        function setupKeyboardShortcuts() {
+            document.addEventListener('keydown', function(e) {
+                // Ctrl + Shift + D for debug info
+                if (e.ctrlKey && e.shiftKey && e.key === 'D') {
+                    e.preventDefault();
+                    toggleDebugInfo();
+                }
+                
+                // Ctrl + Shift + R to reset state
+                if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+                    e.preventDefault();
+                    if (confirm('Reset SmartNet state?')) {
+                        localStorage.clear();
+                        location.reload();
+                    }
+                }
+            });
+        }
+        
+        // Toggle debug info visibility
+        function toggleDebugInfo() {
+            const debugDiv = document.getElementById('debug-info');
+            if (debugDiv) {
+                debugDiv.style.display = debugDiv.style.display === 'none' ? 'block' : 'none';
+            }
+        }
+        
+        // Enhanced error handling
+        window.addEventListener('error', function(e) {
+            console.error('SmartNet Portal Error:', e.error);
+            window.SMARTNET_STATE.lastError = e.error;
+        });
+        
+        // Handle page visibility changes
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) {
+                console.log('Page visible again, checking connection status...');
+                checkExistingSession();
+            }
+        });
+        
+        console.log('SmartNet Portal: Initialization script loaded');
+    </script>
+    
+    <!-- Debug information (hidden by default) -->
+    <div class="debug-info" id="debug-info" style="display: none;">
+        <div><strong>🔧 Connection Debug Info:</strong></div>
+        <div id="debug-content">
+            $(if chap-id)
+            CHAP Authentication: Enabled<br>
+            CHAP-ID: $(chap-id)<br>
+            $(else)
+            Authentication: Plain text<br>
+            $(endif)
+            Action URL: $(link-login-only)<br>
+            Destination: $(link-orig)<br>
+            Client MAC: $(mac)<br>
+            Client IP: $(ip)<br>
+            Session ID: $(session-id)<br>
+            Link Status: $(link-status)<br>
+            <div id="runtime-debug"></div>
+        </div>
+        <button onclick="toggleDebugInfo()" style="margin-top: 10px;">Hide Debug Info</button>
+    </div>
 </body>
 
 </html>
-
-
-
-
-
