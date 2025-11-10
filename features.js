@@ -1,5 +1,5 @@
 // SmartNet New Features - Spin Wheel, Free WiFi & Ads
-// This file handles the new UI features while keeping original login.js intact
+// Enhanced version with better connectivity and error handling
 
 // Feature Configuration
 const FEATURE_CONFIG = {
@@ -26,26 +26,95 @@ const FEATURE_CONFIG = {
         dailySpins: 'smartnet_daily_spins',
         lastSpinDate: 'smartnet_last_spin_date',
         totalSpins: 'smartnet_total_spins',
-        winHistory: 'smartnet_win_history'
+        winHistory: 'smartnet_win_history',
+        featureState: 'smartnet_feature_state'
+    },
+    
+    // Feature settings
+    settings: {
+        maxRetries: 3,
+        retryDelay: 2000,
+        animationDuration: 3000
     }
 };
 
 // Global variables for features
 let spinAnimationRunning = false;
 let freeWifiCheckInterval = null;
+let featureRetryCount = 0;
 
 // Initialize features when DOM is loaded
 document.addEventListener('DOMContentLoaded', function() {
-    initializeFeatures();
+    // Wait for main configuration to be ready
+    if (typeof window.MIKROTIK_CONFIG === 'undefined') {
+        featureLog('Waiting for MikroTik config...', 'warning');
+        setTimeout(initializeFeatures, 500);
+    } else {
+        initializeFeatures();
+    }
 });
 
 // Initialize all new features
 function initializeFeatures() {
-    initializeSpinWheel();
-    initializeFreeWifi();
-    setupAdvertisement();
+    try {
+        featureLog('SmartNet features initialization started');
+        
+        // Check dependencies
+        if (!checkDependencies()) {
+            featureLog('Dependencies not ready, retrying...', 'warning');
+            if (featureRetryCount < FEATURE_CONFIG.settings.maxRetries) {
+                featureRetryCount++;
+                setTimeout(initializeFeatures, FEATURE_CONFIG.settings.retryDelay);
+                return;
+            }
+            featureLog('Max retries reached, some features may not work', 'error');
+        }
+        
+        // Initialize individual features with error handling
+        safeInitialize('Spin Wheel', initializeSpinWheel);
+        safeInitialize('Free WiFi', initializeFreeWifi);
+        safeInitialize('Advertisement', setupAdvertisement);
+        
+        // Load saved state
+        loadFeatureState();
+        
+        featureLog('SmartNet new features initialized successfully');
+        
+        // Mark features as ready
+        if (window.SMARTNET_STATE) {
+            window.SMARTNET_STATE.featuresReady = true;
+        }
+        
+    } catch (error) {
+        featureLog(`Initialization error: ${error.message}`, 'error');
+    }
+}
+
+// Safe initialization wrapper
+function safeInitialize(featureName, initFunction) {
+    try {
+        initFunction();
+        featureLog(`${featureName} initialized`);
+    } catch (error) {
+        featureLog(`${featureName} initialization failed: ${error.message}`, 'error');
+    }
+}
+
+// Check if required dependencies are available
+function checkDependencies() {
+    const required = [
+        'MIKROTIK_CONFIG',
+        'SESSION_CREDENTIALS'
+    ];
     
-    featureLog('SmartNet new features initialized');
+    for (const dep of required) {
+        if (typeof window[dep] === 'undefined') {
+            featureLog(`Missing dependency: ${dep}`, 'warning');
+            return false;
+        }
+    }
+    
+    return true;
 }
 
 // Logging function for features
@@ -53,6 +122,20 @@ function featureLog(message, type = 'info') {
     const timestamp = new Date().toISOString();
     const logEntry = `[FEATURES ${timestamp}] ${type.toUpperCase()}: ${message}`;
     console.log(logEntry);
+    
+    // Update runtime debug if available
+    const runtimeDebug = document.getElementById('runtime-debug');
+    if (runtimeDebug) {
+        const entry = document.createElement('div');
+        entry.textContent = `${new Date().toLocaleTimeString()} - ${message}`;
+        entry.style.color = type === 'error' ? '#ff6b6b' : type === 'warning' ? '#ffa94d' : '#51cf66';
+        runtimeDebug.insertBefore(entry, runtimeDebug.firstChild);
+        
+        // Keep only last 10 entries
+        while (runtimeDebug.children.length > 10) {
+            runtimeDebug.removeChild(runtimeDebug.lastChild);
+        }
+    }
 }
 
 // === SPIN WHEEL FUNCTIONALITY ===
@@ -62,8 +145,7 @@ function initializeSpinWheel() {
     const spinCountDisplay = document.getElementById('spinCount');
     
     if (!spinBtn || !spinCountDisplay) {
-        featureLog('Spin wheel elements not found', 'warning');
-        return;
+        throw new Error('Spin wheel elements not found');
     }
     
     // Update spin count display
@@ -72,7 +154,16 @@ function initializeSpinWheel() {
     // Add spin button click handler
     spinBtn.addEventListener('click', handleSpin);
     
-    featureLog('Spin wheel initialized');
+    // Add visual feedback
+    spinBtn.addEventListener('mouseenter', function() {
+        if (!spinBtn.disabled) {
+            this.style.transform = 'scale(1.05)';
+        }
+    });
+    
+    spinBtn.addEventListener('mouseleave', function() {
+        this.style.transform = 'scale(1)';
+    });
 }
 
 function updateSpinDisplay() {
@@ -86,26 +177,34 @@ function updateSpinDisplay() {
     
     if (remainingSpins <= 0) {
         spinBtn.disabled = true;
-        spinBtn.textContent = 'NO SPINS';
+        spinBtn.textContent = 'NO SPINS LEFT';
+        spinBtn.style.opacity = '0.5';
     } else {
         spinBtn.disabled = false;
-        spinBtn.textContent = 'SPIN';
+        spinBtn.textContent = 'SPIN NOW!';
+        spinBtn.style.opacity = '1';
     }
 }
 
 function getRemainingSpins() {
-    const today = new Date().toDateString();
-    const lastSpinDate = localStorage.getItem(FEATURE_CONFIG.storageKeys.lastSpinDate);
-    let dailySpins = parseInt(localStorage.getItem(FEATURE_CONFIG.storageKeys.dailySpins)) || 0;
-    
-    // Reset daily spins if it's a new day
-    if (lastSpinDate !== today) {
-        dailySpins = 2; // Reset to 2 spins per day
-        localStorage.setItem(FEATURE_CONFIG.storageKeys.dailySpins, dailySpins.toString());
-        localStorage.setItem(FEATURE_CONFIG.storageKeys.lastSpinDate, today);
+    try {
+        const today = new Date().toDateString();
+        const lastSpinDate = localStorage.getItem(FEATURE_CONFIG.storageKeys.lastSpinDate);
+        let dailySpins = parseInt(localStorage.getItem(FEATURE_CONFIG.storageKeys.dailySpins)) || 0;
+        
+        // Reset daily spins if it's a new day
+        if (lastSpinDate !== today) {
+            dailySpins = 2; // Reset to 2 spins per day
+            localStorage.setItem(FEATURE_CONFIG.storageKeys.dailySpins, dailySpins.toString());
+            localStorage.setItem(FEATURE_CONFIG.storageKeys.lastSpinDate, today);
+            featureLog('Daily spins reset for new day');
+        }
+        
+        return Math.max(0, dailySpins);
+    } catch (error) {
+        featureLog(`Error getting remaining spins: ${error.message}`, 'error');
+        return 0;
     }
-    
-    return Math.max(0, dailySpins);
 }
 
 function useSpinChance() {
@@ -114,6 +213,7 @@ function useSpinChance() {
         const newCount = remainingSpins - 1;
         localStorage.setItem(FEATURE_CONFIG.storageKeys.dailySpins, newCount.toString());
         updateSpinDisplay();
+        featureLog(`Spin used, ${newCount} remaining`);
         return true;
     }
     return false;
@@ -128,7 +228,10 @@ function addBonusSpinChance() {
 }
 
 function handleSpin() {
-    if (spinAnimationRunning) return;
+    if (spinAnimationRunning) {
+        featureLog('Spin already in progress', 'warning');
+        return;
+    }
     
     if (!useSpinChance()) {
         showSpinResult('No Spins Left', 'Come back tomorrow for more spins!', 'error');
@@ -163,7 +266,7 @@ function handleSpin() {
     
     // Apply the spin animation
     if (wheel) {
-        wheel.style.transition = 'transform 3s cubic-bezier(0.23, 1, 0.320, 1)';
+        wheel.style.transition = `transform ${FEATURE_CONFIG.settings.animationDuration}ms cubic-bezier(0.23, 1, 0.320, 1)`;
         wheel.style.transform = `rotate(${finalAngle}deg)`;
     }
     
@@ -189,7 +292,7 @@ function handleSpin() {
         // Show result
         handleSpinResult(prize);
         
-    }, 3000);
+    }, FEATURE_CONFIG.settings.animationDuration);
 }
 
 function selectWinningPrize() {
@@ -258,10 +361,17 @@ function handleSpinResult(prize) {
 function authenticateWonSession(sessionType) {
     featureLog(`Authenticating won session: ${sessionType}`);
     
+    // Check if SESSION_CREDENTIALS is available
+    if (typeof SESSION_CREDENTIALS === 'undefined') {
+        featureLog('SESSION_CREDENTIALS not available', 'error');
+        showMainMessage('Error: Authentication system not ready. Please try direct login.', 'alert');
+        return;
+    }
+    
     // Map spin wins to actual credentials
     const spinCredentials = {
         '3h': SESSION_CREDENTIALS['3h'],
-        '1h': { username: 'smartNet 1h', password: 'smartNet@5120' },
+        '1h': { username: 'smartNet', password: 'smartNet@5120' },
         'data_100mb': { username: 'smartNet data', password: 'smartNet@5120' },
         'data_500mb': { username: 'smartNet data', password: 'smartNet@5120' },
         'data_1gb': { username: 'smartNet data', password: 'smartNet@5120' }
@@ -269,11 +379,20 @@ function authenticateWonSession(sessionType) {
     
     const credentials = spinCredentials[sessionType];
     if (credentials) {
-        showConnectingOverlay();
-        showMainMessage('Spin winner connecting...', 'success');
+        if (typeof showConnectingOverlay === 'function') {
+            showConnectingOverlay();
+        }
+        if (typeof showMainMessage === 'function') {
+            showMainMessage('🎉 Spin winner connecting...', 'success');
+        }
         
         setTimeout(() => {
-            performAuthentication(credentials.username, credentials.password);
+            if (typeof performAuthentication === 'function') {
+                performAuthentication(credentials.username, credentials.password);
+            } else {
+                featureLog('performAuthentication function not available', 'error');
+                showMainMessage('Error connecting. Please use direct login.', 'alert');
+            }
         }, 1000);
     } else {
         featureLog(`No credentials found for spin win: ${sessionType}`, 'error');
@@ -282,25 +401,32 @@ function authenticateWonSession(sessionType) {
 }
 
 function logSpinResult(prize) {
-    const history = JSON.parse(localStorage.getItem(FEATURE_CONFIG.storageKeys.winHistory) || '[]');
-    const entry = {
-        date: new Date().toISOString(),
-        prize: prize.name,
-        type: prize.type
-    };
-    
-    history.unshift(entry);
-    
-    // Keep only last 50 entries
-    if (history.length > 50) {
-        history.splice(50);
+    try {
+        const history = JSON.parse(localStorage.getItem(FEATURE_CONFIG.storageKeys.winHistory) || '[]');
+        const entry = {
+            date: new Date().toISOString(),
+            prize: prize.name,
+            type: prize.type,
+            timestamp: Date.now()
+        };
+        
+        history.unshift(entry);
+        
+        // Keep only last 50 entries
+        if (history.length > 50) {
+            history.splice(50);
+        }
+        
+        localStorage.setItem(FEATURE_CONFIG.storageKeys.winHistory, JSON.stringify(history));
+        
+        // Update total spins counter
+        const totalSpins = parseInt(localStorage.getItem(FEATURE_CONFIG.storageKeys.totalSpins) || '0') + 1;
+        localStorage.setItem(FEATURE_CONFIG.storageKeys.totalSpins, totalSpins.toString());
+        
+        featureLog(`Spin result logged: ${prize.name} (Total spins: ${totalSpins})`);
+    } catch (error) {
+        featureLog(`Error logging spin result: ${error.message}`, 'error');
     }
-    
-    localStorage.setItem(FEATURE_CONFIG.storageKeys.winHistory, JSON.stringify(history));
-    
-    // Update total spins counter
-    const totalSpins = parseInt(localStorage.getItem(FEATURE_CONFIG.storageKeys.totalSpins) || '0') + 1;
-    localStorage.setItem(FEATURE_CONFIG.storageKeys.totalSpins, totalSpins.toString());
 }
 
 function showSpinResult(title, message, type) {
@@ -323,7 +449,8 @@ function showSpinResult(title, message, type) {
     
     modal.innerHTML = `
         <div class="spin-result-content">
-            <h2>${typeIcon} ${title}</h2>
+            <div class="result-icon">${typeIcon}</div>
+            <h2>${title}</h2>
             <p>${message}</p>
             <button class="close-result-btn" onclick="closeSpinResult()">Continue</button>
         </div>
@@ -355,8 +482,7 @@ function initializeFreeWifi() {
     const freeConnectBtn = document.getElementById('freeConnectBtn');
     
     if (!freeConnectBtn) {
-        featureLog('Free WiFi button not found', 'warning');
-        return;
+        throw new Error('Free WiFi button not found');
     }
     
     // Check free WiFi availability immediately
@@ -367,8 +493,6 @@ function initializeFreeWifi() {
     
     // Add click handler
     freeConnectBtn.addEventListener('click', connectFreeWifi);
-    
-    featureLog('Free WiFi feature initialized');
 }
 
 function checkFreeWifiAvailability() {
@@ -388,16 +512,14 @@ function checkFreeWifiAvailability() {
     if (freeConnectBtn) {
         if (isFreeWifiTime) {
             freeConnectBtn.disabled = false;
-            freeConnectBtn.textContent = 'Connect Free Now!';
+            freeConnectBtn.textContent = '🎁 Connect Free Now!';
             freeConnectBtn.style.background = 'linear-gradient(45deg, #51cf66, #40c057)';
             freeConnectBtn.style.cursor = 'pointer';
             freeConnectBtn.style.opacity = '1';
-            
-            // Add pulsing animation
             freeConnectBtn.style.animation = 'pulse 2s infinite';
         } else {
             freeConnectBtn.disabled = true;
-            freeConnectBtn.textContent = 'Free WiFi Available Weekends 12AM-3AM';
+            freeConnectBtn.textContent = 'Free WiFi: Weekends 12AM-3AM';
             freeConnectBtn.style.background = 'rgba(255,255,255,0.2)';
             freeConnectBtn.style.cursor = 'not-allowed';
             freeConnectBtn.style.opacity = '0.6';
@@ -406,7 +528,7 @@ function checkFreeWifiAvailability() {
     }
     
     if (isFreeWifiTime) {
-        featureLog('Free WiFi is now available!');
+        featureLog('🎉 Free WiFi is now available!');
     }
 }
 
@@ -419,8 +541,12 @@ function connectFreeWifi() {
         password: 'smartNet@5120'
     };
     
-    showConnectingOverlay();
-    showMainMessage('Connecting to Free WiFi...', 'success');
+    if (typeof showConnectingOverlay === 'function') {
+        showConnectingOverlay();
+    }
+    if (typeof showMainMessage === 'function') {
+        showMainMessage('🎁 Connecting to Free WiFi...', 'success');
+    }
     
     // Disable the free connect button
     const freeConnectBtn = document.getElementById('freeConnectBtn');
@@ -430,7 +556,14 @@ function connectFreeWifi() {
     }
     
     setTimeout(() => {
-        performAuthentication(freeCredentials.username, freeCredentials.password);
+        if (typeof performAuthentication === 'function') {
+            performAuthentication(freeCredentials.username, freeCredentials.password);
+        } else {
+            featureLog('performAuthentication function not available', 'error');
+            if (typeof showMainMessage === 'function') {
+                showMainMessage('Error: Authentication system not ready', 'alert');
+            }
+        }
     }, 1500);
 }
 
@@ -439,7 +572,7 @@ function connectFreeWifi() {
 function setupAdvertisement() {
     const advertSection = document.querySelector('.advert-section');
     if (advertSection) {
-        advertSection.addEventListener('click', openCashRipple);
+        advertSection.style.cursor = 'pointer';
         featureLog('Advertisement section setup complete');
     }
 }
@@ -495,33 +628,53 @@ function openCashRipple() {
     }, 1500);
 }
 
+// === STATE MANAGEMENT ===
+
+function saveFeatureState() {
+    try {
+        const state = {
+            lastUpdate: new Date().toISOString(),
+            spinsRemaining: getRemainingSpins(),
+            freeWifiAvailable: checkFreeWifiTime()
+        };
+        localStorage.setItem(FEATURE_CONFIG.storageKeys.featureState, JSON.stringify(state));
+    } catch (error) {
+        featureLog(`Error saving feature state: ${error.message}`, 'error');
+    }
+}
+
+function loadFeatureState() {
+    try {
+        const stateStr = localStorage.getItem(FEATURE_CONFIG.storageKeys.featureState);
+        if (stateStr) {
+            const state = JSON.parse(stateStr);
+            featureLog(`Feature state loaded: ${JSON.stringify(state)}`);
+        }
+    } catch (error) {
+        featureLog(`Error loading feature state: ${error.message}`, 'error');
+    }
+}
+
+function checkFreeWifiTime() {
+    const now = new Date();
+    const { days, startHour, endHour } = FEATURE_CONFIG.freeWifiSchedule;
+    return days.includes(now.getDay()) && now.getHours() >= startHour && now.getHours() < endHour;
+}
+
 // === UTILITY FUNCTIONS ===
 
 // Clean up intervals when page unloads
 window.addEventListener('beforeunload', function() {
+    saveFeatureState();
+    
     if (freeWifiCheckInterval) {
         clearInterval(freeWifiCheckInterval);
     }
     featureLog('Features cleanup completed');
 });
 
-// Add fadeOut animation for modals (if not already present)
-if (!document.getElementById('feature-modal-styles')) {
-    const style = document.createElement('style');
-    style.id = 'feature-modal-styles';
-    style.textContent = `
-        @keyframes fadeOut {
-            from { opacity: 1; }
-            to { opacity: 0; }
-        }
-        
-        @keyframes pulse {
-            0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.05); }
-        }
-    `;
-    document.head.appendChild(style);
-}
+// Periodic state save
+setInterval(saveFeatureState, 300000); // Every 5 minutes
 
 // Expose functions for testing/debugging
 window.SmartNetFeatures = {
@@ -538,6 +691,14 @@ window.SmartNetFeatures = {
     },
     getWinHistory: () => {
         return JSON.parse(localStorage.getItem(FEATURE_CONFIG.storageKeys.winHistory) || '[]');
+    },
+    getState: () => {
+        return {
+            initialized: window.SMARTNET_STATE?.featuresReady || false,
+            spinsRemaining: getRemainingSpins(),
+            freeWifiAvailable: checkFreeWifiTime(),
+            totalSpins: localStorage.getItem(FEATURE_CONFIG.storageKeys.totalSpins) || 0
+        };
     }
 };
 

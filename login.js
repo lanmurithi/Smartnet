@@ -1,3 +1,6 @@
+// SmartNet Login & Payment System
+// Enhanced version with improved connectivity and error handling
+
 // PayHero API Configuration
 const PAYHERO_CONFIG = {
     apiUsername: 'Yr4Hrqe0wPL4WmqDD2a8',
@@ -5,7 +8,11 @@ const PAYHERO_CONFIG = {
     baseUrl: 'https://backend.payhero.co.ke/api/v2',
     channelId: 2651,
     provider: 'm-pesa',
-    callbackUrl: 'https://0d6f-102-215-77-246.ngrok-free.app'
+    callbackUrl: 'https://0d6f-102-215-77-246.ngrok-free.app',
+    maxRetries: 3,
+    retryDelay: 2000,
+    statusCheckInterval: 10000,
+    statusCheckTimeout: 300000 // 5 minutes
 };
 
 // Session credentials mapping
@@ -25,6 +32,8 @@ let paymentReference = null;
 let statusCheckInterval = null;
 let redirectTimer = null;
 let authenticationAttempted = false;
+let connectionRetries = 0;
+let progressInterval = null;
 
 // Get MikroTik configuration from HTML
 function getMikroTikConfig() {
@@ -54,13 +63,12 @@ function getBasicAuthToken() {
     return 'Basic ' + btoa(credentials);
 }
 
-// Keyboard event handler for preventing dev tools
+// Keyboard event handler for preventing dev tools (except allowed shortcuts)
 document.addEventListener('keydown', function (e) {
-    if (
-        e.key === 'F12' ||
+    // Block F12 and inspect shortcuts (but allow Ctrl+Shift+D and Ctrl+Shift+R from features.js)
+    if (e.key === 'F12' || 
         (e.ctrlKey && e.shiftKey && e.key === 'I') ||
-        (e.ctrlKey && e.key === 'U')
-    ) {
+        (e.ctrlKey && e.key === 'U')) {
         e.preventDefault();
     }
 });
@@ -70,7 +78,7 @@ function generateExternalReference() {
     return 'SMARTNET-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// Enhanced phone number validation to include new Safaricom format
+// Enhanced phone number validation
 function validatePhoneNumber(phoneNumber) {
     const cleanNumber = phoneNumber.replace(/\D/g, '');
     const patterns = [
@@ -80,11 +88,24 @@ function validatePhoneNumber(phoneNumber) {
     return patterns.some(pattern => pattern.test(cleanNumber));
 }
 
-// Enhanced logging function (console only)
+// Enhanced logging function
 function debugLog(message, type = 'info') {
     const timestamp = new Date().toISOString();
-    const logEntry = `[${timestamp}] ${type.toUpperCase()}: ${message}`;
+    const logEntry = `[LOGIN ${timestamp}] ${type.toUpperCase()}: ${message}`;
     console.log(logEntry);
+    
+    // Update runtime debug
+    const runtimeDebug = document.getElementById('runtime-debug');
+    if (runtimeDebug) {
+        const entry = document.createElement('div');
+        entry.textContent = `${new Date().toLocaleTimeString()} - ${message}`;
+        entry.style.color = type === 'error' ? '#ff6b6b' : type === 'warning' ? '#ffa94d' : '#51cf66';
+        runtimeDebug.insertBefore(entry, runtimeDebug.firstChild);
+        
+        while (runtimeDebug.children.length > 10) {
+            runtimeDebug.removeChild(runtimeDebug.lastChild);
+        }
+    }
 }
 
 // Session selection function
@@ -96,8 +117,26 @@ function selectSession(sessionType, sessionLabel, price) {
     };
     
     debugLog(`Session selected: ${sessionType} (${sessionLabel}) - KES ${price}`);
+    
+    // Visual feedback on selected button
+    highlightSelectedSession(sessionType);
+    
     showPaymentModal();
     return false;
+}
+
+// Highlight selected session button
+function highlightSelectedSession(sessionType) {
+    // Remove previous highlights
+    document.querySelectorAll('.compact-session-btn').forEach(btn => {
+        btn.classList.remove('selected');
+    });
+    
+    // Highlight current selection
+    const btn = document.getElementById(`session-${sessionType}`);
+    if (btn) {
+        btn.classList.add('selected');
+    }
 }
 
 // Show payment modal
@@ -117,7 +156,7 @@ function showPaymentModal() {
     
     modal.innerHTML = `
         <div class="modal-header">
-            <h2>Pay for ${selectedSession.label}</h2>
+            <h2>💳 Pay for ${selectedSession.label}</h2>
             <div class="session-info">
                 <strong>Amount: KES ${selectedSession.price}</strong><br>
                 Duration: ${selectedSession.label}<br>
@@ -127,8 +166,9 @@ function showPaymentModal() {
         
         <form id="paymentForm">
             <div class="form-group">
-                <label for="phoneNumber">M-Pesa Phone Number</label>
-                <input type="text" id="phoneNumber" placeholder="0712345678 or 0112356476" maxlength="10" required>
+                <label for="phoneNumber">📱 M-Pesa Phone Number</label>
+                <input type="tel" id="phoneNumber" placeholder="0712345678 or 0112356476" maxlength="10" required autocomplete="tel">
+                <small class="input-hint">Enter your M-Pesa number</small>
             </div>
             
             <div class="modal-status" id="modalStatus"></div>
@@ -142,7 +182,7 @@ function showPaymentModal() {
                     Cancel
                 </button>
                 <button type="submit" class="btn btn-primary" id="payBtn">
-                    Pay KES ${selectedSession.price}
+                    💳 Pay KES ${selectedSession.price}
                 </button>
             </div>
         </form>
@@ -174,18 +214,26 @@ function showPaymentModal() {
         }
     };
     
-    // Enhanced phone number formatting for both formats
+    // Enhanced phone number formatting
     const phoneInput = document.getElementById('phoneNumber');
     phoneInput.addEventListener('input', function(e) {
         let value = e.target.value.replace(/\D/g, '');
         if (value.length > 10) value = value.substring(0, 10);
         
-        // Handle both traditional (07, 08, 09) and new Safaricom (011) formats
         if (value.length > 0 && !value.startsWith('0')) {
             value = '0' + value;
         }
         
         e.target.value = value;
+        
+        // Visual feedback
+        if (validatePhoneNumber(value)) {
+            e.target.style.borderColor = '#51cf66';
+        } else if (value.length >= 10) {
+            e.target.style.borderColor = '#ff6b6b';
+        } else {
+            e.target.style.borderColor = '';
+        }
     });
     
     debugLog('Payment modal displayed');
@@ -209,7 +257,7 @@ async function handlePaymentSubmit() {
     payBtn.disabled = true;
     cancelBtn.disabled = true;
     
-    showModalStatus('Initiating M-Pesa payment...', 'pending');
+    showModalStatus('💳 Initiating M-Pesa payment...', 'pending');
     
     try {
         const result = await initiatePayment(phoneNumber, selectedSession.price);
@@ -224,13 +272,13 @@ async function handlePaymentSubmit() {
         }
     } catch (error) {
         debugLog(`Payment error: ${error.message}`, 'error');
-        showModalStatus(`Payment failed: ${error.message}`, 'error');
+        showModalStatus(`❌ Payment failed: ${error.message}`, 'error');
         resetModalButtons();
     }
 }
 
-// Initiate PayHero payment
-async function initiatePayment(phoneNumber, amount) {
+// Initiate PayHero payment with retry logic
+async function initiatePayment(phoneNumber, amount, retryCount = 0) {
     const externalReference = generateExternalReference();
     
     const paymentData = {
@@ -243,7 +291,7 @@ async function initiatePayment(phoneNumber, amount) {
         callback_url: PAYHERO_CONFIG.callbackUrl
     };
 
-    debugLog(`Initiating payment: ${JSON.stringify(paymentData)}`);
+    debugLog(`Initiating payment (attempt ${retryCount + 1}/${PAYHERO_CONFIG.maxRetries}): ${JSON.stringify(paymentData)}`);
 
     try {
         const response = await fetch(`${PAYHERO_CONFIG.baseUrl}/payments`, {
@@ -282,12 +330,20 @@ async function initiatePayment(phoneNumber, amount) {
             throw new Error(result.message || result.error || `HTTP ${response.status}`);
         }
     } catch (error) {
-        debugLog(`Payment error: ${error.message}`, 'error');
+        debugLog(`Payment error (attempt ${retryCount + 1}): ${error.message}`, 'error');
+        
+        // Retry logic
+        if (retryCount < PAYHERO_CONFIG.maxRetries - 1) {
+            debugLog(`Retrying payment in ${PAYHERO_CONFIG.retryDelay}ms...`, 'warning');
+            await new Promise(resolve => setTimeout(resolve, PAYHERO_CONFIG.retryDelay));
+            return initiatePayment(phoneNumber, amount, retryCount + 1);
+        }
+        
         throw error;
     }
 }
 
-// Check payment status
+// Check payment status with improved error handling
 async function checkPaymentStatus(reference) {
     try {
         debugLog(`Checking payment status for reference: ${reference}`);
@@ -337,19 +393,21 @@ async function checkPaymentStatus(reference) {
     }
 }
 
-// Start payment status checking
+// Start payment status checking with timeout
 function startPaymentStatusCheck() {
     if (statusCheckInterval) {
         clearInterval(statusCheckInterval);
     }
 
     let attempts = 0;
-    const maxAttempts = 30; // 5 minutes
+    const maxAttempts = Math.floor(PAYHERO_CONFIG.statusCheckTimeout / PAYHERO_CONFIG.statusCheckInterval);
+    const startTime = Date.now();
 
     debugLog(`🔄 Starting status check for reference: ${paymentReference}`);
 
     statusCheckInterval = setInterval(async () => {
         attempts++;
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
         
         try {
             const result = await checkPaymentStatus(paymentReference);
@@ -357,7 +415,7 @@ function startPaymentStatusCheck() {
             if (result.success && result.data) {
                 const status = result.data.status;
                 
-                debugLog(`Status check ${attempts}/${maxAttempts}: ${status}`);
+                debugLog(`Status check ${attempts}/${maxAttempts} (${elapsed}s): ${status}`);
                 
                 if (status === 'successful' || status === 'completed' || status === 'success') {
                     clearInterval(statusCheckInterval);
@@ -373,19 +431,19 @@ function startPaymentStatusCheck() {
                     
                 } else if (status === 'failed' || status === 'cancelled' || status === 'rejected') {
                     clearInterval(statusCheckInterval);
-                    showModalStatus(`❌ Payment failed or cancelled. Please try again.`, 'error');
+                    showModalStatus(`❌ Payment ${status}. Please try again.`, 'error');
                     resetModalButtons();
                     
                 } else if (status === 'pending' || status === 'initiated') {
-                    showModalStatus(`⏳ Payment pending... Please complete on your phone`, 'pending');
+                    showModalStatus(`⏳ Payment pending (${elapsed}s)... Please complete on your phone`, 'pending');
                     
                 } else {
-                    showModalStatus(`🔄 Payment status: ${status}`, 'pending');
+                    showModalStatus(`🔄 Payment status: ${status} (${elapsed}s)`, 'pending');
                 }
             } else {
                 debugLog(`Status check ${attempts}/${maxAttempts}: ${result.message || 'No data'}`);
                 
-                if (attempts % 5 === 0) {
+                if (attempts % 3 === 0) {
                     showModalStatus(`🔍 Checking payment status... (${attempts}/${maxAttempts})`, 'pending');
                 }
             }
@@ -396,10 +454,10 @@ function startPaymentStatusCheck() {
 
         if (attempts >= maxAttempts) {
             clearInterval(statusCheckInterval);
-            showModalStatus(`⏰ Payment verification timeout. If payment was successful, try refreshing the page.`, 'error');
+            showModalStatus(`⏰ Payment verification timeout. If payment was successful, please refresh the page or contact support.`, 'error');
             resetModalButtons();
         }
-    }, 10000); // Check every 10 seconds
+    }, PAYHERO_CONFIG.statusCheckInterval);
 }
 
 // Show modal status
@@ -409,6 +467,12 @@ function showModalStatus(message, type) {
         statusDiv.style.display = 'block';
         statusDiv.textContent = message;
         statusDiv.className = `modal-status ${type}`;
+        
+        // Add animation
+        statusDiv.style.animation = 'none';
+        setTimeout(() => {
+            statusDiv.style.animation = 'slideIn 0.3s ease';
+        }, 10);
     }
 }
 
@@ -429,7 +493,7 @@ function resetModalButtons() {
     const cancelBtn = document.getElementById('cancelBtn');
     
     if (payBtn) {
-        payBtn.textContent = `Pay KES ${selectedSession.price}`;
+        payBtn.textContent = `💳 Pay KES ${selectedSession.price}`;
         payBtn.disabled = false;
     }
     if (cancelBtn) {
@@ -469,16 +533,15 @@ function authenticateWithCredentials() {
     
     debugLog(`Using credentials: ${credentials.username}`);
     
-    // Show connecting overlay
     showConnectingOverlay();
     
     // Disable all session buttons
-    const sessionBtns = document.querySelectorAll('.session-btn');
+    const sessionBtns = document.querySelectorAll('.compact-session-btn');
     sessionBtns.forEach(btn => btn.disabled = true);
     
-    showMainMessage('Payment successful! Connecting to SmartNet...', 'success');
+    showMainMessage('💳 Payment successful! Connecting to SmartNet...', 'success');
+    updateConnectingStatus('Preparing connection...');
     
-    // Wait a moment then authenticate
     setTimeout(() => {
         performAuthentication(credentials.username, credentials.password);
     }, 1000);
@@ -496,30 +559,71 @@ function directLogin() {
     
     debugLog('Starting direct login...');
     
-    // Show connecting overlay
     showConnectingOverlay();
     
     // Disable all buttons
     const buttons = document.querySelectorAll('button');
     buttons.forEach(btn => btn.disabled = true);
     
-    showMainMessage('Logging in...', 'success');
+    showMainMessage('🔐 Logging in...', 'success');
+    updateConnectingStatus('Authenticating...');
     
-    // Wait a moment then authenticate
     setTimeout(() => {
         performAuthentication(username, password);
     }, 1000);
 }
 
-// Show connecting overlay with improved management
+// Show connecting overlay with progress
 function showConnectingOverlay() {
     const overlay = document.getElementById('connectingOverlay');
     if (overlay) {
         overlay.style.display = 'flex';
         authenticationAttempted = true;
         
+        // Start progress animation
+        startProgressAnimation();
+        
         // Start monitoring for successful authentication
         startAuthenticationMonitoring();
+    }
+}
+
+// Update connecting status message
+function updateConnectingStatus(message) {
+    const statusElement = document.getElementById('connectingStatus');
+    if (statusElement) {
+        statusElement.textContent = message;
+    }
+}
+
+// Start progress bar animation
+function startProgressAnimation() {
+    const progressFill = document.getElementById('progressFill');
+    if (!progressFill) return;
+    
+    let progress = 0;
+    progressFill.style.width = '0%';
+    
+    if (progressInterval) {
+        clearInterval(progressInterval);
+    }
+    
+    progressInterval = setInterval(() => {
+        progress += Math.random() * 10;
+        if (progress > 90) progress = 90; // Don't reach 100% until confirmed
+        progressFill.style.width = progress + '%';
+    }, 500);
+}
+
+// Complete progress animation
+function completeProgress() {
+    const progressFill = document.getElementById('progressFill');
+    if (progressFill) {
+        progressFill.style.width = '100%';
+    }
+    if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
     }
 }
 
@@ -530,14 +634,15 @@ function hideConnectingOverlay() {
         overlay.style.display = 'none';
     }
     
-    // Clear any timers
+    completeProgress();
+    
     if (redirectTimer) {
         clearTimeout(redirectTimer);
         redirectTimer = null;
     }
     
     // Re-enable session buttons
-    const sessionBtns = document.querySelectorAll('.session-btn');
+    const sessionBtns = document.querySelectorAll('.compact-session-btn');
     sessionBtns.forEach(btn => btn.disabled = false);
     
     // Re-enable other buttons
@@ -545,13 +650,13 @@ function hideConnectingOverlay() {
     buttons.forEach(btn => btn.disabled = false);
     
     authenticationAttempted = false;
+    connectionRetries = 0;
 }
 
 // Improved authentication monitoring
 function startAuthenticationMonitoring() {
     debugLog('Starting authentication monitoring...');
     
-    // Clear any existing timer
     if (redirectTimer) {
         clearTimeout(redirectTimer);
     }
@@ -559,14 +664,26 @@ function startAuthenticationMonitoring() {
     // Set timeout for authentication failure
     redirectTimer = setTimeout(() => {
         debugLog('Authentication timeout reached', 'warning');
-        hideConnectingOverlay();
-        showMainMessage('Connection timeout. Please check your credentials and try again.', 'alert');
-    }, 15000); // 15 second timeout
+        
+        // Attempt retry
+        if (connectionRetries < 2) {
+            connectionRetries++;
+            debugLog(`Retrying authentication (attempt ${connectionRetries + 1}/3)...`, 'warning');
+            updateConnectingStatus(`Retrying connection (${connectionRetries + 1}/3)...`);
+            
+            // Don't hide overlay, just extend timeout
+            startAuthenticationMonitoring();
+        } else {
+            hideConnectingOverlay();
+            showMainMessage('Connection timeout. Please check your credentials and try again.', 'alert');
+        }
+    }, 15000); // 15 second timeout per attempt
     
     // Monitor for page visibility changes (indicating redirect)
     const handleVisibilityChange = () => {
         if (document.hidden && authenticationAttempted) {
             debugLog('Page became hidden - likely successful redirect');
+            completeProgress();
             clearTimeout(redirectTimer);
         }
     };
@@ -574,12 +691,12 @@ function startAuthenticationMonitoring() {
     // Monitor for beforeunload (page navigation)
     const handleBeforeUnload = () => {
         debugLog('Page unloading - authentication likely successful');
+        completeProgress();
         if (redirectTimer) {
             clearTimeout(redirectTimer);
         }
     };
     
-    // Add event listeners
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('beforeunload', handleBeforeUnload);
     
@@ -587,7 +704,7 @@ function startAuthenticationMonitoring() {
     setTimeout(() => {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
         window.removeEventListener('beforeunload', handleBeforeUnload);
-    }, 16000);
+    }, 46000); // Total timeout: 15s * 3 attempts + buffer
 }
 
 // Perform authentication
@@ -595,14 +712,19 @@ function performAuthentication(username, password) {
     try {
         const config = getMikroTikConfig();
         
+        debugLog(`Performing authentication for user: ${username}`);
+        debugLog(`Action URL: ${config.actionUrl}`);
+        
         // Check if CHAP is enabled
         const isChapEnabled = config.chapId && config.chapId !== '' && config.chapId !== '$(chap-id)';
         
         if (isChapEnabled) {
             debugLog(`Using CHAP authentication with ID: ${config.chapId}`);
+            updateConnectingStatus('CHAP authentication in progress...');
             performChapAuthentication(username, password, config);
         } else {
             debugLog('Using plain text authentication');
+            updateConnectingStatus('Submitting credentials...');
             performPlainAuthentication(username, password, config);
         }
     } catch (error) {
@@ -636,7 +758,7 @@ function performChapAuthentication(username, password, config) {
             debugLog('Submitting CHAP authentication form...');
             debugLog(`Form action: ${sendinForm.action}`);
             
-            // Submit form and handle potential redirect
+            // Submit form
             sendinForm.submit();
             
         } else {
@@ -649,13 +771,13 @@ function performChapAuthentication(username, password, config) {
     }
 }
 
-// Plain text authentication - IMPROVED VERSION
+// Plain text authentication
 function performPlainAuthentication(username, password, config) {
     try {
         debugLog('Creating authentication form...');
         debugLog(`Action URL from config: ${config.actionUrl}`);
         
-        // Check if actionUrl is properly replaced
+        // Validate action URL
         if (!config.actionUrl || config.actionUrl.includes('$(') || config.actionUrl === '/login') {
             debugLog('Warning: Action URL may not be properly set by MikroTik', 'warning');
         }
@@ -690,8 +812,6 @@ function performPlainAuthentication(username, password, config) {
         // Submit the form
         form.submit();
         
-        // The authentication monitoring will handle success/failure detection
-        
     } catch (error) {
         debugLog(`Plain authentication failed: ${error.message}`, 'error');
         showMainMessage('Authentication failed', 'alert');
@@ -718,6 +838,12 @@ function showMainMessage(message, type) {
     if (messageDiv) {
         messageDiv.textContent = message;
         messageDiv.className = `info ${type}`;
+        
+        // Add animation
+        messageDiv.style.animation = 'none';
+        setTimeout(() => {
+            messageDiv.style.animation = 'pulse 0.5s ease';
+        }, 10);
     }
 }
 
@@ -732,53 +858,58 @@ document.addEventListener('DOMContentLoaded', function() {
     setTimeout(() => {
         const config = getMikroTikConfig();
         
+        debugLog(`=== MikroTik Configuration ===`);
         debugLog(`Action URL: ${config.actionUrl}`);
         debugLog(`Destination: ${config.destination}`);
         debugLog(`CHAP ID: ${config.chapId}`);
         debugLog(`Client IP: ${config.ip}`);
         debugLog(`Client MAC: ${config.mac}`);
         debugLog(`Error: ${config.error}`);
+        debugLog(`=============================`);
         
-        // Check if user is already authenticated or there's an error
-        if (config.error && config.error.trim() !== '') {
+        if (config.error && config.error.trim() !== '' && !config.error.includes('$(')) {
             debugLog(`MikroTik error detected: ${config.error}`);
-            showMainMessage(`Connection Error: ${config.error}`, 'alert');
+            showError(config.error);
+            return;
         }
-        
-        // Check if CHAP is enabled
-        if (config.chapId && config.chapId !== '' && config.chapId !== '$(chap-id)') {
-            debugLog('CHAP authentication enabled');
-            if (typeof hexMD5 !== 'function') {
-                debugLog('MD5 function not available - will load when needed', 'warning');
+
+        // If no error, proceed to show login form
+        showLoginForm();
+
+        // Attach login handler
+        const loginButton = document.getElementById('loginButton');
+        loginButton.addEventListener('click', function() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            if (!username || !password) {
+                showError('Please enter both username and password.');
+                return;
             }
-        } else {
-            debugLog('Plain text authentication mode');
-        }
-        
-        debugLog('Initialization complete - ready for session selection and payment');
-    }, 100);
+
+            // Optionally show connecting overlay
+            showConnectingOverlay();
+
+            // Perform CHAP authentication if chapId is present
+            if (config.chapId) {
+                const chapResponse = generateChapResponse(config.chapId, password);
+                submitLogin(config.actionUrl, {
+                    username: username,
+                    response: chapResponse,
+                    dst: config.destination,
+                    popup: true
+                });
+            } else {
+                // Fallback to plain login
+                submitLogin(config.actionUrl, {
+                    username: username,
+                    password: password,
+                    dst: config.destination,
+                    popup: true
+                });
+            }
+        });
+    }, 500); // Delay to ensure config is available
 });
 
-// Clean up on page unload
-window.addEventListener('beforeunload', function() {
-    if (statusCheckInterval) {
-        clearInterval(statusCheckInterval);
-    }
-    if (redirectTimer) {
-        clearTimeout(redirectTimer);
-    }
-    debugLog('Page unloading - cleaning up intervals and timers');
-});
 
-// Add fadeOut animation for modals
-if (!document.getElementById('modal-styles')) {
-    const style = document.createElement('style');
-    style.id = 'modal-styles';
-    style.textContent = `
-        @keyframes fadeOut {
-            from { opacity: 1; }
-            to { opacity: 0; }
-        }
-    `;
-    document.head.appendChild(style);
-}
